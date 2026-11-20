@@ -1,6 +1,7 @@
 import io
 from dataclasses import dataclass
 from typing import Optional
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -36,6 +37,10 @@ class ParametrosKCO:
         return self.rebate + self.cd_acopio + (self.promo_5_cobros if self.activar_promo else 0.0)
 
     @property
+    def factor_neto_venta(self) -> float:
+        return 1.0 - self.tasa_descuentos
+
+    @property
     def jaba_skg(self) -> float:
         total_jaba = (
             self.alquiler_jaba * self.dias_alquiler
@@ -69,7 +74,7 @@ if "tabla_lote" not in st.session_state:
 
 
 # ==========================================
-# 2. MOTOR DE CÁLCULO (SIN DATOS FIJOS)
+# 2. MOTOR DE CÁLCULO UNITARIO Y DE LOTE
 # ==========================================
 def cotizar_item(
     base_compra: Optional[float],
@@ -82,15 +87,15 @@ def cotizar_item(
         return None
 
     factor_merma = 1.0 - p.merma
-    divisor_desc = 1.0 - p.tasa_descuentos
-    if factor_merma <= 0 or divisor_desc <= 0:
+    k_neto = p.factor_neto_venta
+    if factor_merma <= 0 or k_neto <= 0:
         return None
 
     costo_base_real = base_compra / factor_merma
     costos_fijos_op = p.operativos_skg + p.fijo_b2b_skg
 
-    precio_equilibrio = (costo_base_real + costos_fijos_op) / divisor_desc
-    precio_min_meta = (costo_base_real + costos_fijos_op + p.utilidad_meta) / divisor_desc
+    precio_equilibrio = (costo_base_real + costos_fijos_op) / k_neto
+    precio_min_meta = (costo_base_real + costos_fijos_op + p.utilidad_meta) / k_neto
 
     tiene_oferta = precio_ofertado is not None and not pd.isna(precio_ofertado) and precio_ofertado > 0
     if tiene_oferta:
@@ -106,12 +111,10 @@ def cotizar_item(
         utilidad_skg = margen_venta_pct = None
         estado = "PENDIENTE OFERTA"
 
-    tiene_spsa = objetivo_spsa is not None and not pd.isna(objetivo_spsa) and objetivo_spsa > 0
-    utilidad_a_spsa = (objetivo_spsa * divisor_desc - (costo_base_real + costos_fijos_op)) if tiene_spsa else None
-
     tiene_kilos = kilos_compra is not None and not pd.isna(kilos_compra) and kilos_compra > 0
     kilos_vendibles = kilos_compra * factor_merma if tiene_kilos else None
     utilidad_total = (kilos_vendibles * utilidad_skg) if (tiene_kilos and tiene_oferta) else None
+    venta_total = (kilos_vendibles * precio_ofertado) if (tiene_kilos and tiene_oferta) else None
 
     return {
         "costo_base_real": costo_base_real,
@@ -122,12 +125,151 @@ def cotizar_item(
         "rebate_skg": rebate_skg,
         "cd_skg": cd_skg,
         "promo_skg": promo_skg,
+        "costo_total_skg": costo_total_skg,
         "utilidad_skg": utilidad_skg,
         "margen_venta_pct": margen_venta_pct,
-        "utilidad_a_spsa": utilidad_a_spsa,
         "kilos_vendibles": kilos_vendibles,
         "utilidad_total": utilidad_total,
+        "venta_total": venta_total,
         "estado": estado,
+    }
+
+
+def optimizar_compensacion_lote(
+    df_base: pd.DataFrame,
+    p: ParametrosKCO,
+    modo: str = "Proporcional a Kilos (tope SPSA)",
+    tope_subida_skg: Optional[float] = None,
+    usar_base_proy: bool = False,
+) -> Optional[dict]:
+    """
+    Evalúa el lote completo y distribuye la brecha de utilidad faltante entre códigos
+    con margen disponible hasta el Objetivo SPSA (o tope configurado).
+    """
+    k_neto = p.factor_neto_venta
+    factor_merma = 1.0 - p.merma
+    if k_neto <= 0 or factor_merma <= 0:
+        return None
+
+    registros = []
+    for _, row in df_base.iterrows():
+        base_col = "Base Proyectado" if (usar_base_proy and pd.notna(row["Base Proyectado"]) and row["Base Proyectado"] > 0) else "Base Compra"
+        base_val = row[base_col]
+        oferta_val = row["Precio Ofertado"]
+        kilos_val = row["Kilos Compra"]
+        spsa_val = row["Objetivo SPSA"]
+
+        if pd.isna(base_val) or base_val <= 0 or pd.isna(oferta_val) or oferta_val <= 0 or pd.isna(kilos_val) or kilos_val <= 0:
+            continue
+
+        costo_base_real = base_val / factor_merma
+        costos_fijos_op = p.operativos_skg + p.fijo_b2b_skg
+        kg_vend = kilos_val * factor_merma
+        u_actual = oferta_val * k_neto - (costo_base_real + costos_fijos_op)
+        u_tot_actual = kg_vend * u_actual
+        u_meta_tot = kg_vend * p.utilidad_meta
+        venta_actual = kg_vend * oferta_val
+
+        # Límite superior de precio para compensar: Objetivo SPSA si existe, o sin límite adicional
+        tiene_spsa = pd.notna(spsa_val) and spsa_val > 0
+        techo_spsa = float(spsa_val) if tiene_spsa else np.inf
+        techo_tope = (float(oferta_val) + float(tope_subida_skg)) if (tope_subida_skg is not None and tope_subida_skg > 0) else np.inf
+        precio_techo = max(float(oferta_val), min(techo_spsa, techo_tope))
+        max_subida_posible = max(0.0, precio_techo - float(oferta_val))
+        capacidad_u_extra = kg_vend * max_subida_posible * k_neto
+        holgura_spsa = max(0.0, float(spsa_val) - float(oferta_val)) if tiene_spsa else 0.0
+
+        registros.append({
+            "Código": row["Código"] if pd.notna(row["Código"]) else "",
+            "Base Usada": base_val,
+            "Costo Base Real": costo_base_real,
+            "Costos Fijos+Op": costos_fijos_op,
+            "Kilos Vendibles": kg_vend,
+            "Precio Ofertado": float(oferta_val),
+            "Objetivo SPSA": float(spsa_val) if tiene_spsa else np.nan,
+            "Precio Techo": precio_techo,
+            "Holgura SPSA": holgura_spsa,
+            "Max Subida": max_subida_posible,
+            "Capacidad U Extra": capacidad_u_extra,
+            "Utilidad Actual (S/kg)": u_actual,
+            "Utilidad Actual Total": u_tot_actual,
+            "Utilidad Meta Total": u_meta_tot,
+            "Venta Actual Total": venta_actual,
+        })
+
+    if not registros:
+        return None
+
+    df = pd.DataFrame(registros)
+    u_actual_lote = df["Utilidad Actual Total"].sum()
+    u_meta_lote = df["Utilidad Meta Total"].sum()
+    venta_actual_lote = df["Venta Actual Total"].sum()
+    brecha_lote = u_meta_lote - u_actual_lote
+
+    df["Precio Compensado"] = df["Precio Ofertado"].copy()
+
+    if brecha_lote > 1e-6:
+        restante_u = brecha_lote
+        # Iteración agua-llenado respetando techos individuales
+        activos = df[df["Max Subida"] > 1e-9].copy()
+        if not activos.empty:
+            if modo == "Priorizar holgura vs. SPSA":
+                # Ordena de mayor holgura relativa hacia menor para cargar primero donde hay más espacio
+                activos = activos.sort_values(by=["Holgura SPSA", "Kilos Vendibles"], ascending=[False, False])
+                for idx in activos.index:
+                    if restante_u <= 1e-6:
+                        break
+                    cap_item = df.loc[idx, "Capacidad U Extra"]
+                    aporte = min(restante_u, cap_item)
+                    delta_p = aporte / (df.loc[idx, "Kilos Vendibles"] * k_neto)
+                    df.loc[idx, "Precio Compensado"] = df.loc[idx, "Precio Ofertado"] + delta_p
+                    restante_u -= aporte
+            else:
+                # Proporcional a kilos vendibles (con reparto iterativo si algún código toca su techo)
+                pendiente_idx = list(activos.index)
+                while restante_u > 1e-6 and pendiente_idx:
+                    peso_total = df.loc[pendiente_idx, "Kilos Vendibles"].sum()
+                    if peso_total <= 0:
+                        break
+                    algun_tope = False
+                    for idx in list(pendiente_idx):
+                        peso_frac = df.loc[idx, "Kilos Vendibles"] / peso_total
+                        aporte_prop = restante_u * peso_frac
+                        max_restante_item = (df.loc[idx, "Precio Techo"] - df.loc[idx, "Precio Compensado"]) * df.loc[idx, "Kilos Vendibles"] * k_neto
+                        if aporte_prop >= max_restante_item - 1e-9:
+                            df.loc[idx, "Precio Compensado"] = df.loc[idx, "Precio Techo"]
+                            restante_u -= max(0.0, max_restante_item)
+                            pendiente_idx.remove(idx)
+                            algun_tope = True
+                    if not algun_tope:
+                        for idx in pendiente_idx:
+                            peso_frac = df.loc[idx, "Kilos Vendibles"] / peso_total
+                            aporte_prop = restante_u * peso_frac
+                            delta_p = aporte_prop / (df.loc[idx, "Kilos Vendibles"] * k_neto)
+                            df.loc[idx, "Precio Compensado"] += delta_p
+                        restante_u = 0.0
+
+    df["Ajuste Precio (S/kg)"] = df["Precio Compensado"] - df["Precio Ofertado"]
+    df["Utilidad Comp. (S/kg)"] = df["Precio Compensado"] * k_neto - (df["Costo Base Real"] + df["Costos Fijos+Op"])
+    df["Margen Comp. (%)"] = (df["Utilidad Comp. (S/kg)"] / df["Precio Compensado"]) * 100
+    df["Utilidad Comp. Total"] = df["Kilos Vendibles"] * df["Utilidad Comp. (S/kg)"]
+    df["Venta Comp. Total"] = df["Kilos Vendibles"] * df["Precio Compensado"]
+
+    u_comp_lote = df["Utilidad Comp. Total"].sum()
+    venta_comp_lote = df["Venta Comp. Total"].sum()
+    margen_pond_actual = (u_actual_lote / venta_actual_lote * 100) if venta_actual_lote > 0 else 0.0
+    margen_pond_comp = (u_comp_lote / venta_comp_lote * 100) if venta_comp_lote > 0 else 0.0
+    brecha_restante = max(0.0, u_meta_lote - u_comp_lote)
+
+    return {
+        "tabla": df,
+        "u_actual_lote": u_actual_lote,
+        "u_meta_lote": u_meta_lote,
+        "u_comp_lote": u_comp_lote,
+        "brecha_lote": brecha_lote,
+        "brecha_restante": brecha_restante,
+        "margen_pond_actual": margen_pond_actual,
+        "margen_pond_comp": margen_pond_comp,
     }
 
 
@@ -256,9 +398,9 @@ with tab_calc:
 with tab_lote:
     st.markdown(
         "**Cómo usar esta tabla:** "
-        "1) Agrega ítems desde **Calculadora Rápida** o con el botón **`+`** de la tabla. "
-        "2) Primero revisa **Base Compra**, **Base Proyectado** y **P. Equilibrio**; luego **Precio Ofertado** y **P. Mínimo Meta**; al final **Objetivo SPSA** y **Kilos Compra**. "
-        "3) Usa **Limpiar lote** para iniciar una cotización nueva."
+        "1) Agrega ítems desde **Calculadora Rápida** o con **`+`**. "
+        "2) Completa **Base Compra**, **Base Proyectado**, **Precio Ofertado**, **Objetivo SPSA** y **Kilos Compra**. "
+        "3) Revisa la evaluación individual y luego el **Optimizador de Utilidad del Lote** para compensar precios cuando un competidor apriete un código."
     )
 
     if st.button("Limpiar lote"):
@@ -325,12 +467,68 @@ with tab_lote:
             hide_index=True,
         )
 
+        # --- OPTIMIZADOR DE COMBINACIONES ENTRE CÓDIGOS Y COSTOS ---
+        st.divider()
+        st.subheader("Combinaciones y Compensación de Utilidad en el Lote")
+        st.caption(
+            "Calcula cómo compensar la utilidad del lote completo cuando un competidor baja el precio de un código, "
+            "ajustando precios en códigos con margen hasta el Objetivo SPSA o evaluando Base Proyectado."
+        )
+
+        o1, o2, o3 = st.columns(3)
+        modo_comp = o1.selectbox(
+            "Criterio de compensación entre códigos",
+            ["Proporcional a Kilos (tope SPSA)", "Priorizar holgura vs. SPSA"],
+        )
+        tope_subida = o2.number_input("Tope máximo de subida por código (S/kg, 0 = sin tope)", value=0.0, min_value=0.0, step=0.05)
+        usar_base_proy = o3.checkbox("Evaluar usando Base Proyectado (donde exista)", value=False)
+
+        opt = optimizar_compensacion_lote(
+            edited_df,
+            params,
+            modo=modo_comp,
+            tope_subida_skg=tope_subida if tope_subida > 0 else None,
+            usar_base_proy=usar_base_proy,
+        )
+
+        if opt is None:
+            st.info("Completa **Base Compra**, **Precio Ofertado** y **Kilos Compra** en al menos una fila para calcular la compensación del lote.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Utilidad Actual del Lote", f"S/ {opt['u_actual_lote']:,.2f}", f"Margen pond. {opt['margen_pond_actual']:.1f}%")
+            k2.metric(f"Utilidad Meta (S/ {params.utilidad_meta:.2f}/kg)", f"S/ {opt['u_meta_lote']:,.2f}", f"Brecha: S/ {opt['brecha_lote']:,.2f}")
+            k3.metric("Utilidad Compensada", f"S/ {opt['u_comp_lote']:,.2f}", f"Margen pond. {opt['margen_pond_comp']:.1f}%")
+            k4.metric("Brecha sin cubrir", f"S/ {opt['brecha_restante']:,.2f}", "Lote en meta" if opt["brecha_restante"] <= 0.01 else "Falta techo SPSA")
+
+            df_comp_show = opt["tabla"][[
+                "Código", "Base Usada", "Precio Ofertado", "Objetivo SPSA",
+                "Ajuste Precio (S/kg)", "Precio Compensado", "Kilos Vendibles",
+                "Utilidad Comp. (S/kg)", "Margen Comp. (%)", "Utilidad Comp. Total"
+            ]]
+            st.dataframe(
+                df_comp_show.style.format({
+                    "Base Usada": "S/ {:.2f}",
+                    "Precio Ofertado": "S/ {:.2f}",
+                    "Objetivo SPSA": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
+                    "Ajuste Precio (S/kg)": "+S/ {:.2f}" if False else lambda x: f"{'+' if x > 0 else ''}S/ {x:.2f}",
+                    "Precio Compensado": "S/ {:.2f}",
+                    "Kilos Vendibles": "{:,.1f}",
+                    "Utilidad Comp. (S/kg)": "S/ {:.2f}",
+                    "Margen Comp. (%)": "{:.1f}%",
+                    "Utilidad Comp. Total": "S/ {:,.2f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df_out.to_excel(writer, index=False, sheet_name="Cotizacion_KCO")
+            df_out.to_excel(writer, index=False, sheet_name="Cotizacion_Lote")
+            if opt is not None:
+                opt["tabla"].to_excel(writer, index=False, sheet_name="Compensacion_Lote")
         st.download_button(
-            label="Descargar Cotización (.xlsx)",
+            label="Descargar Cotización y Compensación (.xlsx)",
             data=buffer.getvalue(),
-            file_name="KCO_Cotizacion.xlsx",
+            file_name="KCO_Cotizacion_Completa.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
