@@ -180,8 +180,8 @@ tab_calc, tab_lote = st.tabs(["Calculadora Rápida", "Cotización por Lote"])
 with tab_calc:
     c1, c2, c3, c4 = st.columns(4)
     base_in = c1.number_input("Costo Base Compra (S/kg)", value=None, min_value=0.0, step=0.10)
-    spsa_in = c2.number_input("Contraoferta SPSA (S/kg)", value=None, min_value=0.0, step=0.10)
-    ofertado_in = c3.number_input("Precio Ofertado (S/kg)", value=None, min_value=0.0, step=0.05)
+    ofertado_in = c2.number_input("Precio Ofertado (S/kg)", value=None, min_value=0.0, step=0.05)
+    spsa_in = c3.number_input("Contraoferta SPSA (S/kg)", value=None, min_value=0.0, step=0.10)
     kilos_in = c4.number_input("Kilos Compra (kg)", value=None, min_value=0.0, step=100.0)
 
     res = cotizar_item(base_in, ofertado_in, spsa_in, kilos_in, params)
@@ -222,13 +222,21 @@ with tab_calc:
 
 # --- PESTAÑA 2: COTIZACIÓN POR LOTE ---
 with tab_lote:
+    st.markdown(
+        "**Cómo usar esta tabla:** "
+        "1) Haz clic en **`+`** para agregar filas. "
+        "2) Completa primero **Base Compra** (y **Base Proy.** si aplica) para ver tu piso y precio mínimo meta. "
+        "3) Escribe tu **Precio Ofertado**, el **Objetivo SPSA** y los **Kilos Compra** para evaluar margen y utilidad. "
+        "4) Ajusta merma, B2B o interruptores en la barra lateral izquierda."
+    )
+
     if "tabla_lote" not in st.session_state:
         st.session_state.tabla_lote = pd.DataFrame({
             "Código": pd.Series(dtype="str"),
-            "Objetivo SPSA": pd.Series(dtype="float64"),
             "Base Compra": pd.Series(dtype="float64"),
             "Base Proyectado": pd.Series(dtype="float64"),
             "Precio Ofertado": pd.Series(dtype="float64"),
+            "Objetivo SPSA": pd.Series(dtype="float64"),
             "Kilos Compra": pd.Series(dtype="float64"),
         })
 
@@ -238,10 +246,10 @@ with tab_lote:
         use_container_width=True,
         column_config={
             "Código": st.column_config.TextColumn("Código / Producto"),
-            "Objetivo SPSA": st.column_config.NumberColumn("Objetivo SPSA (S/kg)", min_value=0.0, step=0.05, format="S/ %.2f"),
             "Base Compra": st.column_config.NumberColumn("Base Compra (S/kg)", min_value=0.0, step=0.05, format="S/ %.2f"),
             "Base Proyectado": st.column_config.NumberColumn("Base Proy. (S/kg)", min_value=0.0, step=0.05, format="S/ %.2f"),
             "Precio Ofertado": st.column_config.NumberColumn("Precio Ofertado (S/kg)", min_value=0.0, step=0.05, format="S/ %.2f"),
+            "Objetivo SPSA": st.column_config.NumberColumn("Objetivo SPSA (S/kg)", min_value=0.0, step=0.05, format="S/ %.2f"),
             "Kilos Compra": st.column_config.NumberColumn("Kilos Compra", min_value=0.0, step=10.0, format="%.1f"),
         },
     )
@@ -255,10 +263,11 @@ with tab_lote:
         filas_salida.append({
             "Código": row["Código"] if pd.notna(row["Código"]) else "",
             "Base Compra": row["Base Compra"],
+            "Base Proy.": row["Base Proyectado"],
             "P. Equilibrio (U=0)": r_real["precio_equilibrio"],
+            "Precio Ofertado": row["Precio Ofertado"],
             "P. Mínimo Meta": r_real["precio_min_meta"],
             "Objetivo SPSA": row["Objetivo SPSA"],
-            "Precio Ofertado": row["Precio Ofertado"],
             "Utilidad Real (S/kg)": r_real["utilidad_skg"],
             "Margen Real (%)": r_real["margen_venta_pct"],
             "Utilidad Proy. (S/kg)": r_proy["utilidad_skg"] if r_proy else None,
@@ -267,16 +276,17 @@ with tab_lote:
         })
 
     if not filas_salida:
-        st.info("Haz clic en el signo '+' de la tabla superior e ingresa al menos el **Base Compra** para calcular.")
+        st.info("Agrega una fila con **`+`** e ingresa al menos el **Base Compra** para calcular.")
     else:
         df_out = pd.DataFrame(filas_salida)
         st.dataframe(
             df_out.style.format({
                 "Base Compra": "S/ {:.2f}",
+                "Base Proy.": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
                 "P. Equilibrio (U=0)": "S/ {:.2f}",
+                "Precio Ofertado": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
                 "P. Mínimo Meta": "S/ {:.2f}",
                 "Objetivo SPSA": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
-                "Precio Ofertado": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
                 "Utilidad Real (S/kg)": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
                 "Margen Real (%)": lambda x: f"{x:.1f}%" if pd.notna(x) else "—",
                 "Utilidad Proy. (S/kg)": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
