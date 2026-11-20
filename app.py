@@ -74,7 +74,54 @@ if "tabla_lote" not in st.session_state:
 
 
 # ==========================================
-# 2. MOTOR DE CÁLCULO UNITARIO Y DE LOTE
+# 2. FORMATOS CONDICIONALES PARA TABLAS
+# ==========================================
+def estilo_estado(val: str) -> str:
+    if val == "CUMPLE":
+        return "background-color: #dcfce7; color: #166534; font-weight: 600;"
+    if val == "REVISAR":
+        return "background-color: #fee2e2; color: #991b1b; font-weight: 600;"
+    return "background-color: #f1f5f9; color: #475569;"
+
+
+def estilo_utilidad_vs_meta(val: Optional[float], meta: float) -> str:
+    if val is None or pd.isna(val):
+        return ""
+    if val >= meta - 1e-6:
+        return "background-color: #dcfce7; color: #166534; font-weight: 600;"
+    if val >= 0:
+        return "background-color: #fef3c7; color: #92400e; font-weight: 600;"
+    return "background-color: #fee2e2; color: #991b1b; font-weight: 600;"
+
+
+def estilo_ajuste_precio(val: Optional[float]) -> str:
+    if val is None or pd.isna(val):
+        return ""
+    if val > 1e-6:
+        return "background-color: #dbeafe; color: #1e40af; font-weight: 600;"
+    if val < -1e-6:
+        return "background-color: #fef3c7; color: #92400e; font-weight: 600;"
+    return ""
+
+
+def estilo_deficit_soles(val: Optional[float]) -> str:
+    if val is None or pd.isna(val):
+        return ""
+    if val > 1e-6:
+        return "background-color: #fee2e2; color: #991b1b; font-weight: 600;"
+    return "background-color: #dcfce7; color: #166534;"
+
+
+def estilo_kilos_extra(val: Optional[float]) -> str:
+    if val is None or pd.isna(val):
+        return ""
+    if val > 1e-6:
+        return "background-color: #dcfce7; color: #166534; font-weight: 600;"
+    return ""
+
+
+# ==========================================
+# 3. MOTOR DE CÁLCULO UNITARIO Y DE LOTE
 # ==========================================
 def cotizar_item(
     base_compra: Optional[float],
@@ -204,7 +251,11 @@ def optimizar_precios_lote(
     df["Precio Techo"] = np.maximum(df["Precio Ofertado"], np.minimum(techo_spsa, techo_tope))
     df["Max Subida"] = np.maximum(0.0, df["Precio Techo"] - df["Precio Ofertado"])
     df["Capacidad U Extra"] = df["Kilos Vendibles"] * df["Max Subida"] * k_neto
-    df["Holgura SPSA"] = np.where(df["Objetivo SPSA"].notna() & (df["Objetivo SPSA"] > 0), np.maximum(0.0, df["Objetivo SPSA"] - df["Precio Ofertado"]), 0.0)
+    df["Holgura SPSA"] = np.where(
+        df["Objetivo SPSA"].notna() & (df["Objetivo SPSA"] > 0),
+        np.maximum(0.0, df["Objetivo SPSA"] - df["Precio Ofertado"]),
+        0.0,
+    )
 
     u_actual_lote = df["Utilidad Actual Total"].sum()
     u_meta_lote = df["Utilidad Meta Total"].sum()
@@ -276,21 +327,15 @@ def optimizar_cantidades_lote(
     p: ParametrosKCO,
     criterio_vol: str = "Repartir entre códigos con mayor utilidad/kg",
 ) -> dict:
-    """
-    Mantiene los precios actuales de la cotización y calcula cuántos kilos vender/comprar
-    de los códigos que superan la utilidad meta para cubrir el déficit en soles del lote.
-    """
     factor_merma = 1.0 - p.merma
     df = df_items.copy()
 
-    # Déficit en soles de códigos cuya utilidad unitaria está por debajo de la utilidad meta
     df["Brecha Unit. vs Meta"] = p.utilidad_meta - df["Utilidad Actual (S/kg)"]
     df["Déficit S/ (bajo meta)"] = np.where(
         df["Utilidad Actual (S/kg)"] < p.utilidad_meta,
         df["Kilos Vendibles"] * (p.utilidad_meta - df["Utilidad Actual (S/kg)"]),
         0.0,
     )
-    # Excedente de utilidad por cada kg adicional vendido en códigos por encima de la meta
     df["Excedente Unit. (S/kg)"] = np.maximum(0.0, df["Utilidad Actual (S/kg)"] - p.utilidad_meta)
 
     deficit_total_s = df["Déficit S/ (bajo meta)"].sum()
@@ -313,8 +358,6 @@ def optimizar_cantidades_lote(
             df.loc[mejor_idx, "Kilos Compra Sugeridos"] += kg_comp_extra
             df.loc[mejor_idx, "Kilos Extra (Compra)"] = kg_comp_extra
         else:
-            # Reparte el déficit en soles proporcionalmente a la capacidad de aporte de cada ganador
-            # (ponderado por su excedente unitario y volumen base)
             df["Peso Ganador"] = np.where(
                 df["Excedente Unit. (S/kg)"] > 1e-9,
                 df["Excedente Unit. (S/kg)"] * np.maximum(df["Kilos Vendibles"], 1.0),
@@ -352,7 +395,7 @@ def optimizar_cantidades_lote(
 
 
 # ==========================================
-# 3. BARRA LATERAL: PARÁMETROS CONTRACTUALES
+# 4. BARRA LATERAL: PARÁMETROS CONTRACTUALES
 # ==========================================
 with st.sidebar:
     st.header("Parámetros KCO")
@@ -400,7 +443,7 @@ params = ParametrosKCO(
 
 
 # ==========================================
-# 4. INTERFAZ PRINCIPAL DE LA CALCULADORA
+# 5. INTERFAZ PRINCIPAL DE LA CALCULADORA
 # ==========================================
 st.title("Calculadora Cotizadora — KCO Group")
 st.caption(
@@ -478,7 +521,7 @@ with tab_lote:
         "**Cómo usar esta tabla:** "
         "1) Agrega ítems desde **Calculadora Rápida** o con **`+`**. "
         "2) Completa **Base Compra**, **Base Proyectado**, **Precio Ofertado**, **Objetivo SPSA** y **Kilos Compra**. "
-        "3) Revisa la tabla de cotización y abajo usa **Combinaciones y Compensación de Utilidad en el Lote** para ver si compensar por **Precio** o por **Cantidad (kilos)** cuando un competidor ajuste un código."
+        "3) **Colores:** Verde = cumple utilidad meta o recibe kilos extra de compensación | Ámbar = utilidad positiva pero bajo meta | Rojo = bajo meta/pérdida o con déficit en soles | Azul = subida de precio sugerida."
     )
 
     if st.button("Limpiar lote"):
@@ -530,8 +573,9 @@ with tab_lote:
         st.info("Agrega un ítem desde **Calculadora Rápida** o en la tabla superior con al menos **Base Compra**.")
     else:
         df_out = pd.DataFrame(filas_salida)
-        st.dataframe(
-            df_out.style.format({
+        styled_out = (
+            df_out.style
+            .format({
                 "Base Compra": "S/ {:.2f}",
                 "Base Proy.": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
                 "P. Equilibrio (U=0)": "S/ {:.2f}",
@@ -543,10 +587,12 @@ with tab_lote:
                 "Margen Real (%)": lambda x: f"{x:.1f}%" if pd.notna(x) else "—",
                 "Utilidad Proy. (S/kg)": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
                 "Utilidad Total (S/)": lambda x: f"S/ {x:,.2f}" if pd.notna(x) else "—",
-            }),
-            use_container_width=True,
-            hide_index=True,
+            })
+            .map(estilo_estado, subset=["Estado"])
+            .map(lambda v: estilo_utilidad_vs_meta(v, params.utilidad_meta), subset=["Utilidad Real (S/kg)"])
+            .map(lambda v: estilo_utilidad_vs_meta(v, params.utilidad_meta), subset=["Utilidad Proy. (S/kg)"])
         )
+        st.dataframe(styled_out, use_container_width=True, hide_index=True)
 
         # --- COMBINACIONES Y COMPENSACIÓN DE UTILIDAD EN EL LOTE ---
         st.divider()
@@ -560,7 +606,6 @@ with tab_lote:
         else:
             sub_precio, sub_cantidad = st.tabs(["Compensar por Precio", "Compensar por Cantidad (Kilos)"])
 
-            # --- SUBPESTAÑA A: COMPENSAR POR PRECIO ---
             with sub_precio:
                 st.caption("Ajusta precios en los códigos con margen hasta el Objetivo SPSA para cubrir la brecha de utilidad del lote.")
                 o1, o2 = st.columns(2)
@@ -588,8 +633,9 @@ with tab_lote:
                     "Ajuste Precio (S/kg)", "Precio Compensado", "Kilos Vendibles",
                     "Utilidad Comp. (S/kg)", "Margen Comp. (%)", "Utilidad Comp. Total"
                 ]]
-                st.dataframe(
-                    df_comp_show.style.format({
+                styled_comp = (
+                    df_comp_show.style
+                    .format({
                         "Base Usada": "S/ {:.2f}",
                         "Precio Ofertado": "S/ {:.2f}",
                         "Objetivo SPSA": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
@@ -599,16 +645,16 @@ with tab_lote:
                         "Utilidad Comp. (S/kg)": "S/ {:.2f}",
                         "Margen Comp. (%)": "{:.1f}%",
                         "Utilidad Comp. Total": "S/ {:,.2f}",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
+                    })
+                    .map(estilo_ajuste_precio, subset=["Ajuste Precio (S/kg)"])
+                    .map(lambda v: estilo_utilidad_vs_meta(v, params.utilidad_meta), subset=["Utilidad Comp. (S/kg)"])
                 )
+                st.dataframe(styled_comp, use_container_width=True, hide_index=True)
 
-            # --- SUBPESTAÑA B: COMPENSAR POR CANTIDAD (KILOS) ---
             with sub_cantidad:
                 st.caption(
-                    "Si bajaste el precio de un código (o su utilidad/kg quedó bajo la meta), mantiene los precios de tu cotización "
-                    "y calcula cuántos kilos extra vender/comprar en los códigos que superan la utilidad meta para llegar al objetivo del lote."
+                    "Mantiene los precios de tu cotización y calcula cuántos kilos extra vender/comprar "
+                    "en los códigos que superan la utilidad meta para llegar al objetivo del lote."
                 )
                 criterio_vol = st.selectbox(
                     "Cómo repartir la cantidad extra a vender",
@@ -632,7 +678,6 @@ with tab_lote:
                         "Subir kilos no cerrará el déficit: sube precio o reduce el costo base de compra."
                     )
                 else:
-                    # Mensaje guía concreto de qué cantidad subir en qué código
                     subidas = opt_q["tabla"][opt_q["tabla"]["Kilos Extra (Compra)"] > 1e-6]
                     if not subidas.empty:
                         resumen_lineas = [
@@ -648,8 +693,9 @@ with tab_lote:
                     "Kilos Compra", "Kilos Extra (Compra)", "Kilos Compra Sugeridos",
                     "Kilos Vend. Sugeridos", "Utilidad Vol. Total"
                 ]]
-                st.dataframe(
-                    df_vol_show.style.format({
+                styled_vol = (
+                    df_vol_show.style
+                    .format({
                         "Precio Ofertado": "S/ {:.2f}",
                         "Utilidad Actual (S/kg)": "S/ {:.2f}",
                         "Déficit S/ (bajo meta)": "S/ {:,.2f}",
@@ -658,10 +704,12 @@ with tab_lote:
                         "Kilos Compra Sugeridos": "{:,.1f}",
                         "Kilos Vend. Sugeridos": "{:,.1f}",
                         "Utilidad Vol. Total": "S/ {:,.2f}",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
+                    })
+                    .map(lambda v: estilo_utilidad_vs_meta(v, params.utilidad_meta), subset=["Utilidad Actual (S/kg)"])
+                    .map(estilo_deficit_soles, subset=["Déficit S/ (bajo meta)"])
+                    .map(estilo_kilos_extra, subset=["Kilos Extra (Compra)"])
                 )
+                st.dataframe(styled_vol, use_container_width=True, hide_index=True)
 
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
