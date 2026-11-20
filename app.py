@@ -53,6 +53,21 @@ class ParametrosKCO:
         return self.portal_b2b / self.ventas_mes_est if self.ventas_mes_est > 0 else 0.0
 
 
+def tabla_lote_vacia() -> pd.DataFrame:
+    return pd.DataFrame({
+        "Código": pd.Series(dtype="str"),
+        "Base Compra": pd.Series(dtype="float64"),
+        "Base Proyectado": pd.Series(dtype="float64"),
+        "Precio Ofertado": pd.Series(dtype="float64"),
+        "Objetivo SPSA": pd.Series(dtype="float64"),
+        "Kilos Compra": pd.Series(dtype="float64"),
+    })
+
+
+if "tabla_lote" not in st.session_state:
+    st.session_state.tabla_lote = tabla_lote_vacia()
+
+
 # ==========================================
 # 2. MOTOR DE CÁLCULO (SIN DATOS FIJOS)
 # ==========================================
@@ -171,23 +186,25 @@ st.title("Calculadora Cotizadora — KCO Group")
 st.caption(
     f"Descuentos SPSA: {params.tasa_descuentos*100:.2f}% | "
     f"Operativos + Jaba: S/ {params.operativos_skg:.4f}/kg | "
-    f"Fijo B2B: S/ {params.fijo_b2b_skg:.4f}/kg"
+    f"Fijo B2B: S/ {params.fijo_b2b_skg:.4f}/kg | "
+    f"Ítems en lote: {len(st.session_state.tabla_lote.dropna(how='all'))}"
 )
 
 tab_calc, tab_lote = st.tabs(["Calculadora Rápida", "Cotización por Lote"])
 
 # --- PESTAÑA 1: CALCULADORA RÁPIDA ---
 with tab_calc:
-    c1, c2, c3, c4 = st.columns(4)
-    base_in = c1.number_input("Costo Base Compra (S/kg)", value=None, min_value=0.0, step=0.10)
+    c0, c1, c2, c3, c4 = st.columns([1, 1.2, 1.2, 1.2, 1.2])
+    codigo_in = c0.text_input("Código / Calibre", value="", placeholder="Ej. A, P, M...")
+    base_in = c1.number_input("Base Compra (S/kg)", value=None, min_value=0.0, step=0.10)
     ofertado_in = c2.number_input("Precio Ofertado (S/kg)", value=None, min_value=0.0, step=0.05)
-    spsa_in = c3.number_input("Contraoferta SPSA (S/kg)", value=None, min_value=0.0, step=0.10)
+    spsa_in = c3.number_input("Objetivo SPSA (S/kg)", value=None, min_value=0.0, step=0.10)
     kilos_in = c4.number_input("Kilos Compra (kg)", value=None, min_value=0.0, step=100.0)
 
     res = cotizar_item(base_in, ofertado_in, spsa_in, kilos_in, params)
 
     if res is None:
-        st.info("Ingresa el **Costo Base Compra (S/kg)** para calcular a cuánto debes vender.")
+        st.info("Ingresa al menos **Base Compra (S/kg)** para calcular a cuánto debes vender.")
     else:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Precio Equilibrio (U = S/ 0.00)", f"S/ {res['precio_equilibrio']:.2f}/kg")
@@ -202,6 +219,21 @@ with tab_calc:
             f"S/ {res['utilidad_total']:,.2f}" if res["utilidad_total"] is not None else "—",
             f"{res['kilos_vendibles']:,.1f} kg vendibles" if res["kilos_vendibles"] is not None else "Ingresa kilos",
         )
+
+        if st.button("Agregar a Cotización por Lote", type="primary"):
+            nueva_fila = pd.DataFrame([{
+                "Código": codigo_in.strip(),
+                "Base Compra": float(base_in),
+                "Base Proyectado": None,
+                "Precio Ofertado": float(ofertado_in) if ofertado_in is not None else None,
+                "Objetivo SPSA": float(spsa_in) if spsa_in is not None else None,
+                "Kilos Compra": float(kilos_in) if kilos_in is not None else None,
+            }])
+            st.session_state.tabla_lote = pd.concat(
+                [st.session_state.tabla_lote, nueva_fila],
+                ignore_index=True,
+            )
+            st.success(f"Agregado a la cotización por lote (total: {len(st.session_state.tabla_lote)} ítems).")
 
         if res["utilidad_skg"] is not None:
             desglose = pd.DataFrame([
@@ -224,28 +256,22 @@ with tab_calc:
 with tab_lote:
     st.markdown(
         "**Cómo usar esta tabla:** "
-        "1) Haz clic en **`+`** para agregar filas. "
-        "2) Completa primero **Base Compra** (y **Base Proy.** si aplica) para ver tu piso y precio mínimo meta. "
-        "3) Escribe tu **Precio Ofertado**, el **Objetivo SPSA** y los **Kilos Compra** para evaluar margen y utilidad. "
-        "4) Ajusta merma, B2B o interruptores en la barra lateral izquierda."
+        "1) Agrega ítems desde **Calculadora Rápida** o con el botón **`+`** de la tabla. "
+        "2) Primero revisa **Base Compra**, **Base Proyectado** y **P. Equilibrio**; luego **Precio Ofertado** y **P. Mínimo Meta**; al final **Objetivo SPSA** y **Kilos Compra**. "
+        "3) Usa **Limpiar lote** para iniciar una cotización nueva."
     )
 
-    if "tabla_lote" not in st.session_state:
-        st.session_state.tabla_lote = pd.DataFrame({
-            "Código": pd.Series(dtype="str"),
-            "Base Compra": pd.Series(dtype="float64"),
-            "Base Proyectado": pd.Series(dtype="float64"),
-            "Precio Ofertado": pd.Series(dtype="float64"),
-            "Objetivo SPSA": pd.Series(dtype="float64"),
-            "Kilos Compra": pd.Series(dtype="float64"),
-        })
+    if st.button("Limpiar lote"):
+        st.session_state.tabla_lote = tabla_lote_vacia()
+        st.rerun()
 
     edited_df = st.data_editor(
         st.session_state.tabla_lote,
         num_rows="dynamic",
         use_container_width=True,
+        key="editor_lote",
         column_config={
-            "Código": st.column_config.TextColumn("Código / Producto"),
+            "Código": st.column_config.TextColumn("Código"),
             "Base Compra": st.column_config.NumberColumn("Base Compra (S/kg)", min_value=0.0, step=0.05, format="S/ %.2f"),
             "Base Proyectado": st.column_config.NumberColumn("Base Proy. (S/kg)", min_value=0.0, step=0.05, format="S/ %.2f"),
             "Precio Ofertado": st.column_config.NumberColumn("Precio Ofertado (S/kg)", min_value=0.0, step=0.05, format="S/ %.2f"),
@@ -253,6 +279,7 @@ with tab_lote:
             "Kilos Compra": st.column_config.NumberColumn("Kilos Compra", min_value=0.0, step=10.0, format="%.1f"),
         },
     )
+    st.session_state.tabla_lote = edited_df
 
     filas_salida = []
     for _, row in edited_df.iterrows():
@@ -268,6 +295,7 @@ with tab_lote:
             "Precio Ofertado": row["Precio Ofertado"],
             "P. Mínimo Meta": r_real["precio_min_meta"],
             "Objetivo SPSA": row["Objetivo SPSA"],
+            "Kilos Compra": row["Kilos Compra"],
             "Utilidad Real (S/kg)": r_real["utilidad_skg"],
             "Margen Real (%)": r_real["margen_venta_pct"],
             "Utilidad Proy. (S/kg)": r_proy["utilidad_skg"] if r_proy else None,
@@ -276,7 +304,7 @@ with tab_lote:
         })
 
     if not filas_salida:
-        st.info("Agrega una fila con **`+`** e ingresa al menos el **Base Compra** para calcular.")
+        st.info("Agrega un ítem desde **Calculadora Rápida** o en la tabla superior con al menos **Base Compra**.")
     else:
         df_out = pd.DataFrame(filas_salida)
         st.dataframe(
@@ -287,6 +315,7 @@ with tab_lote:
                 "Precio Ofertado": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
                 "P. Mínimo Meta": "S/ {:.2f}",
                 "Objetivo SPSA": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
+                "Kilos Compra": lambda x: f"{x:,.1f}" if pd.notna(x) else "—",
                 "Utilidad Real (S/kg)": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
                 "Margen Real (%)": lambda x: f"{x:.1f}%" if pd.notna(x) else "—",
                 "Utilidad Proy. (S/kg)": lambda x: f"S/ {x:.2f}" if pd.notna(x) else "—",
